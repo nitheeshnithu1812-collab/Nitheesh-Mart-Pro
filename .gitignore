@@ -1,0 +1,5 @@
+﻿build/
+vcpkg_installed/
+*.exe
+*.obj
+*.log
