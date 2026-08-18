@@ -45,7 +45,6 @@ int main() {
            std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
             auto json = req->getJsonObject();
             Json::Value response;
-
             if (!json) {
                 response["status"] = "error";
                 response["message"] = "Invalid JSON body";
@@ -54,12 +53,10 @@ int main() {
                 callback(resp);
                 return;
             }
-
             std::string fullName = (*json)["full_name"].asString();
             std::string email = (*json)["email"].asString();
             std::string password = (*json)["password"].asString();
             std::string phone = (*json).isMember("phone") ? (*json)["phone"].asString() : "";
-
             if (fullName.empty() || email.empty() || password.empty()) {
                 response["status"] = "error";
                 response["message"] = "full_name, email, and password are required";
@@ -68,9 +65,7 @@ int main() {
                 callback(resp);
                 return;
             }
-
             std::string hashedPassword = drogon::utils::getSha256(password);
-
             auto dbClient = drogon::app().getDbClient();
             dbClient->execSqlAsync(
                 "INSERT INTO users (full_name, email, phone, password_hash, role_id) VALUES ($1, $2, $3, $4, (SELECT id FROM roles WHERE role_name = 'customer')) RETURNING id, full_name, email",
@@ -103,7 +98,6 @@ int main() {
            std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
             auto json = req->getJsonObject();
             Json::Value response;
-
             if (!json) {
                 response["status"] = "error";
                 response["message"] = "Invalid JSON body";
@@ -112,10 +106,8 @@ int main() {
                 callback(resp);
                 return;
             }
-
             std::string email = (*json)["email"].asString();
             std::string password = (*json)["password"].asString();
-
             if (email.empty() || password.empty()) {
                 response["status"] = "error";
                 response["message"] = "email and password are required";
@@ -124,9 +116,7 @@ int main() {
                 callback(resp);
                 return;
             }
-
             std::string hashedPassword = drogon::utils::getSha256(password);
-
             auto dbClient = drogon::app().getDbClient();
             dbClient->execSqlAsync(
                 "SELECT id, full_name, email, role_id FROM users WHERE email = $1 AND password_hash = $2",
@@ -140,25 +130,21 @@ int main() {
                         callback(resp);
                         return;
                     }
-
                     int userId = result[0]["id"].as<int>();
                     std::string fullName = result[0]["full_name"].as<std::string>();
                     int roleId = result[0]["role_id"].as<int>();
-
                     auto token = jwt::create<traits>()
                         .set_type("JWS")
                         .set_issuer("nitheesh-mart")
                         .set_payload_claim("user_id", traits::value_type(std::to_string(userId)))
                         .set_payload_claim("role_id", traits::value_type(std::to_string(roleId)))
                         .sign(jwt::algorithm::hs256{JWT_SECRET});
-
                     response["status"] = "ok";
                     response["message"] = "Login successful";
                     response["token"] = token;
                     response["user_id"] = userId;
                     response["full_name"] = fullName;
                     response["role_id"] = roleId;
-
                     auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
                     callback(resp);
                 },
@@ -174,7 +160,6 @@ int main() {
         },
         {drogon::Post});
 
-    // GET all categories
     drogon::app().registerHandler(
         "/api/categories",
         [](const drogon::HttpRequestPtr &req,
@@ -208,14 +193,12 @@ int main() {
         },
         {drogon::Get});
 
-    // POST create category
     drogon::app().registerHandler(
         "/api/categories",
         [](const drogon::HttpRequestPtr &req,
            std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
             auto json = req->getJsonObject();
             Json::Value response;
-
             if (!json || (*json)["name"].asString().empty()) {
                 response["status"] = "error";
                 response["message"] = "name is required";
@@ -224,10 +207,8 @@ int main() {
                 callback(resp);
                 return;
             }
-
             std::string name = (*json)["name"].asString();
             std::string description = (*json).isMember("description") ? (*json)["description"].asString() : "";
-
             auto dbClient = drogon::app().getDbClient();
             dbClient->execSqlAsync(
                 "INSERT INTO categories (name, description) VALUES ($1, $2) RETURNING id, name",
@@ -252,7 +233,6 @@ int main() {
         },
         {drogon::Post});
 
-    // GET all products
     drogon::app().registerHandler(
         "/api/products",
         [](const drogon::HttpRequestPtr &req,
@@ -290,15 +270,93 @@ int main() {
                 });
         },
         {drogon::Get});
+    drogon::app().registerHandler(
+        "/api/products/search?q={1}",
+        [](const drogon::HttpRequestPtr &req,
+           std::function<void(const drogon::HttpResponsePtr &)> &&callback,
+           std::string query) {
+            auto dbClient = drogon::app().getDbClient();
+            std::string likeQuery = "%" + query + "%";
+            dbClient->execSqlAsync(
+                "SELECT id, name, description, price, stock, category_id, seller_id, image_url FROM products WHERE is_active = TRUE AND name ILIKE $1 ORDER BY created_at DESC",
+                [callback](const drogon::orm::Result &result) {
+                    Json::Value response;
+                    Json::Value list(Json::arrayValue);
+                    for (const auto &row : result) {
+                        Json::Value item;
+                        item["id"] = row["id"].as<int>();
+                        item["name"] = row["name"].as<std::string>();
+                        item["price"] = row["price"].as<std::string>();
+                        item["stock"] = row["stock"].as<int>();
+                        list.append(item);
+                    }
+                    response["status"] = "ok";
+                    response["results"] = list;
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                    callback(resp);
+                },
+                [callback](const drogon::orm::DrogonDbException &e) {
+                    Json::Value response;
+                    response["status"] = "error";
+                    response["message"] = std::string("Database error: ") + e.base().what();
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                    resp->setStatusCode(drogon::k500InternalServerError);
+                    callback(resp);
+                },
+                likeQuery);
+        },
+        {drogon::Get});
 
-    // POST create product
+    drogon::app().registerHandler(
+        "/api/products/{1}",
+        [](const drogon::HttpRequestPtr &req,
+           std::function<void(const drogon::HttpResponsePtr &)> &&callback,
+           int id) {
+            auto dbClient = drogon::app().getDbClient();
+            dbClient->execSqlAsync(
+                "SELECT id, name, description, price, stock, category_id, seller_id, image_url FROM products WHERE id = $1",
+                [callback](const drogon::orm::Result &result) {
+                    Json::Value response;
+                    if (result.size() == 0) {
+                        response["status"] = "error";
+                        response["message"] = "Product not found";
+                        auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                        resp->setStatusCode(drogon::k404NotFound);
+                        callback(resp);
+                        return;
+                    }
+                    const auto &row = result[0];
+                    Json::Value item;
+                    item["id"] = row["id"].as<int>();
+                    item["name"] = row["name"].as<std::string>();
+                    item["description"] = row["description"].isNull() ? "" : row["description"].as<std::string>();
+                    item["price"] = row["price"].as<std::string>();
+                    item["stock"] = row["stock"].as<int>();
+                    item["category_id"] = row["category_id"].as<int>();
+                    item["seller_id"] = row["seller_id"].as<int>();
+                    response["status"] = "ok";
+                    response["product"] = item;
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                    callback(resp);
+                },
+                [callback](const drogon::orm::DrogonDbException &e) {
+                    Json::Value response;
+                    response["status"] = "error";
+                    response["message"] = std::string("Database error: ") + e.base().what();
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                    resp->setStatusCode(drogon::k500InternalServerError);
+                    callback(resp);
+                },
+                id);
+        },
+        {drogon::Get});
+
     drogon::app().registerHandler(
         "/api/products",
         [](const drogon::HttpRequestPtr &req,
            std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
             auto json = req->getJsonObject();
             Json::Value response;
-
             if (!json) {
                 response["status"] = "error";
                 response["message"] = "Invalid JSON body";
@@ -307,7 +365,6 @@ int main() {
                 callback(resp);
                 return;
             }
-
             std::string name = (*json)["name"].asString();
             std::string description = (*json).isMember("description") ? (*json)["description"].asString() : "";
             double price = (*json)["price"].asDouble();
@@ -315,7 +372,6 @@ int main() {
             int categoryId = (*json)["category_id"].asInt();
             int sellerId = (*json)["seller_id"].asInt();
             std::string imageUrl = (*json).isMember("image_url") ? (*json)["image_url"].asString() : "";
-
             if (name.empty() || price <= 0 || categoryId <= 0 || sellerId <= 0) {
                 response["status"] = "error";
                 response["message"] = "name, price, category_id, seller_id are required";
@@ -324,7 +380,6 @@ int main() {
                 callback(resp);
                 return;
             }
-
             auto dbClient = drogon::app().getDbClient();
             dbClient->execSqlAsync(
                 "INSERT INTO products (name, description, price, stock, category_id, seller_id, image_url) "
@@ -349,6 +404,89 @@ int main() {
                 name, description, price, stock, categoryId, sellerId, imageUrl);
         },
         {drogon::Post});
+
+    drogon::app().registerHandler(
+        "/api/products/{1}",
+        [](const drogon::HttpRequestPtr &req,
+           std::function<void(const drogon::HttpResponsePtr &)> &&callback,
+           int id) {
+            auto json = req->getJsonObject();
+            Json::Value response;
+            if (!json) {
+                response["status"] = "error";
+                response["message"] = "Invalid JSON body";
+                auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                resp->setStatusCode(drogon::k400BadRequest);
+                callback(resp);
+                return;
+            }
+            std::string name = (*json)["name"].asString();
+            double price = (*json)["price"].asDouble();
+            int stock = (*json)["stock"].asInt();
+            auto dbClient = drogon::app().getDbClient();
+            dbClient->execSqlAsync(
+                "UPDATE products SET name = $1, price = $2, stock = $3 WHERE id = $4 RETURNING id",
+                [callback](const drogon::orm::Result &result) {
+                    Json::Value response;
+                    if (result.size() == 0) {
+                        response["status"] = "error";
+                        response["message"] = "Product not found";
+                        auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                        resp->setStatusCode(drogon::k404NotFound);
+                        callback(resp);
+                        return;
+                    }
+                    response["status"] = "ok";
+                    response["message"] = "Product updated";
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                    callback(resp);
+                },
+                [callback](const drogon::orm::DrogonDbException &e) {
+                    Json::Value response;
+                    response["status"] = "error";
+                    response["message"] = std::string("Database error: ") + e.base().what();
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                    resp->setStatusCode(drogon::k500InternalServerError);
+                    callback(resp);
+                },
+                name, price, stock, id);
+        },
+        {drogon::Put});
+
+    drogon::app().registerHandler(
+        "/api/products/{1}",
+        [](const drogon::HttpRequestPtr &req,
+           std::function<void(const drogon::HttpResponsePtr &)> &&callback,
+           int id) {
+            auto dbClient = drogon::app().getDbClient();
+            dbClient->execSqlAsync(
+                "UPDATE products SET is_active = FALSE WHERE id = $1 RETURNING id",
+                [callback](const drogon::orm::Result &result) {
+                    Json::Value response;
+                    if (result.size() == 0) {
+                        response["status"] = "error";
+                        response["message"] = "Product not found";
+                        auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                        resp->setStatusCode(drogon::k404NotFound);
+                        callback(resp);
+                        return;
+                    }
+                    response["status"] = "ok";
+                    response["message"] = "Product deleted";
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                    callback(resp);
+                },
+                [callback](const drogon::orm::DrogonDbException &e) {
+                    Json::Value response;
+                    response["status"] = "error";
+                    response["message"] = std::string("Database error: ") + e.base().what();
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+                    resp->setStatusCode(drogon::k500InternalServerError);
+                    callback(resp);
+                },
+                id);
+        },
+        {drogon::Delete});
 
     drogon::app().loadConfigFile("./config.json");
     drogon::app().run();
