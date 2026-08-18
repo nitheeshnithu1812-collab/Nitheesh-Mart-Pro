@@ -5,6 +5,7 @@
 
 const std::string JWT_SECRET = "nitheesh_mart_secret_key_2026";
 using traits = jwt::traits::nlohmann_json;
+int getUserIdFromToken(const drogon::HttpRequestPtr& req);
 
 int main() {
     std::cout << "Nitheesh Mart backend starting..." << std::endl;
@@ -488,8 +489,165 @@ int main() {
         },
         {drogon::Delete});
 
+    drogon::app().registerHandler("/api/cart/add",
+[](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+    int uid = getUserIdFromToken(req);
+    if (uid == -1) {
+        Json::Value res; res["status"]="error"; res["message"]="Unauthorized";
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k401Unauthorized); cb(resp); return;
+    }
+    auto json = req->getJsonObject();
+    if (!json || !(*json).isMember("product_id") || !(*json).isMember("quantity")) {
+        Json::Value res; res["status"]="error"; res["message"]="product_id and quantity required";
+        cb(drogon::HttpResponse::newHttpJsonResponse(res)); return;
+    }
+    int pid = (*json)["product_id"].asInt();
+    int qty = (*json)["quantity"].asInt();
+    try {
+        auto db = drogon::app().getDbClient();
+        int cartId;
+        auto r = db->execSqlSync("SELECT id FROM cart WHERE user_id=$1", uid);
+        if (r.size() > 0) cartId = r[0]["id"].as<int>();
+        else {
+            auto r2 = db->execSqlSync("INSERT INTO cart (user_id) VALUES ($1) RETURNING id", uid);
+            cartId = r2[0]["id"].as<int>();
+        }
+        auto r3 = db->execSqlSync("SELECT id, quantity FROM cart_items WHERE cart_id=$1 AND product_id=$2", cartId, pid);
+        if (r3.size() > 0) {
+            int nq = r3[0]["quantity"].as<int>() + qty;
+            db->execSqlSync("UPDATE cart_items SET quantity=$1 WHERE id=$2", nq, r3[0]["id"].as<int>());
+        } else {
+            db->execSqlSync("INSERT INTO cart_items (cart_id, product_id, quantity) VALUES ($1,$2,$3)", cartId, pid, qty);
+        }
+        Json::Value res; res["status"]="success"; res["message"]="Item added to cart";
+        cb(drogon::HttpResponse::newHttpJsonResponse(res));
+    } catch (const drogon::orm::DrogonDbException &e) {
+        Json::Value res; res["status"]="error"; res["message"]=e.base().what();
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k500InternalServerError); cb(resp);
+    }
+}, {drogon::Post});
+
+    drogon::app().registerHandler("/api/cart",
+[](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+    int uid = getUserIdFromToken(req);
+    if (uid == -1) {
+        Json::Value res; res["status"]="error"; res["message"]="Unauthorized";
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k401Unauthorized); cb(resp); return;
+    }
+    try {
+        auto db = drogon::app().getDbClient();
+        auto cr = db->execSqlSync("SELECT id FROM cart WHERE user_id=$1", uid);
+        Json::Value res; res["status"]="success";
+        Json::Value items(Json::arrayValue);
+        double total = 0;
+        if (cr.size() > 0) {
+            int cartId = cr[0]["id"].as<int>();
+            auto r = db->execSqlSync(
+                "SELECT ci.id, ci.product_id, p.name, p.price, ci.quantity "
+                "FROM cart_items ci JOIN products p ON ci.product_id=p.id "
+                "WHERE ci.cart_id=$1", cartId);
+            for (auto &row : r) {
+                Json::Value it;
+                it["cart_item_id"] = row["id"].as<int>();
+                it["product_id"] = row["product_id"].as<int>();
+                it["name"] = row["name"].as<std::string>();
+                it["price"] = row["price"].as<double>();
+                it["quantity"] = row["quantity"].as<int>();
+                total += row["price"].as<double>() * row["quantity"].as<int>();
+                items.append(it);
+            }
+        }
+        res["items"] = items;
+        res["total"] = total;
+        cb(drogon::HttpResponse::newHttpJsonResponse(res));
+    } catch (const drogon::orm::DrogonDbException &e) {
+        Json::Value res; res["status"]="error"; res["message"]=e.base().what();
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k500InternalServerError); cb(resp);
+    }
+}, {drogon::Get});
+
+    drogon::app().registerHandler("/api/cart/update/{id}",
+[](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb, int id) {
+    int uid = getUserIdFromToken(req);
+    if (uid == -1) {
+        Json::Value res; res["status"]="error"; res["message"]="Unauthorized";
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k401Unauthorized); cb(resp); return;
+    }
+    auto json = req->getJsonObject();
+    if (!json || !(*json).isMember("quantity")) {
+        Json::Value res; res["status"]="error"; res["message"]="quantity required";
+        cb(drogon::HttpResponse::newHttpJsonResponse(res)); return;
+    }
+    int qty = (*json)["quantity"].asInt();
+    try {
+        auto db = drogon::app().getDbClient();
+        db->execSqlSync(
+            "UPDATE cart_items SET quantity=$1 WHERE id=$2 AND cart_id IN "
+            "(SELECT id FROM cart WHERE user_id=$3)", qty, id, uid);
+        Json::Value res; res["status"]="success"; res["message"]="Quantity updated";
+        cb(drogon::HttpResponse::newHttpJsonResponse(res));
+    } catch (const drogon::orm::DrogonDbException &e) {
+        Json::Value res; res["status"]="error"; res["message"]=e.base().what();
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k500InternalServerError); cb(resp);
+    }
+}, {drogon::Put});
+
+    drogon::app().registerHandler("/api/cart/remove/{id}",
+[](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb, int id) {
+    int uid = getUserIdFromToken(req);
+    if (uid == -1) {
+        Json::Value res; res["status"]="error"; res["message"]="Unauthorized";
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k401Unauthorized); cb(resp); return;
+    }
+    try {
+        auto db = drogon::app().getDbClient();
+        db->execSqlSync(
+            "DELETE FROM cart_items WHERE id=$1 AND cart_id IN "
+            "(SELECT id FROM cart WHERE user_id=$2)", id, uid);
+        Json::Value res; res["status"]="success"; res["message"]="Item removed";
+        cb(drogon::HttpResponse::newHttpJsonResponse(res));
+    } catch (const drogon::orm::DrogonDbException &e) {
+        Json::Value res; res["status"]="error"; res["message"]=e.base().what();
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k500InternalServerError); cb(resp);
+    }
+}, {drogon::Delete});
+
     drogon::app().loadConfigFile("./config.json");
     drogon::app().run();
 
     return 0;
 }
+
+int getUserIdFromToken(const drogon::HttpRequestPtr& req) {
+    auto authHeader = req->getHeader("Authorization");
+    if (authHeader.empty() || authHeader.substr(0, 7) != "Bearer ") return -1;
+    std::string token = authHeader.substr(7);
+    try {
+        auto decoded = jwt::decode<traits>(token);
+        auto verifier = jwt::verify<jwt::default_clock, traits>({})
+            .allow_algorithm(jwt::algorithm::hs256{JWT_SECRET});
+        verifier.verify(decoded);
+        return std::stoi(decoded.get_payload_json()["user_id"].get<std::string>());
+    } catch (...) {
+        return -1;
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
