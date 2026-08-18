@@ -677,6 +677,117 @@ int main() {
 }, {drogon::Post});
 
     drogon::app().loadConfigFile("./config.json");
+        drogon::app().registerHandler("/api/orders", [](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+        int userId;
+        try { userId = getUserIdFromToken(req); }
+        catch (...) {
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(Json::Value());
+            resp->setStatusCode(drogon::k401Unauthorized);
+            callback(resp);
+            return;
+        }
+        auto client = drogon::app().getDbClient();
+        client->execSqlAsync("SELECT id, total_amount, status, created_at FROM orders WHERE user_id = $1 ORDER BY created_at DESC",
+            [callback](const drogon::orm::Result& r) {
+                Json::Value arr(Json::arrayValue);
+                for (auto row : r) {
+                    Json::Value o;
+                    o["id"] = row["id"].as<int>();
+                    o["total_amount"] = row["total_amount"].as<double>();
+                    o["status"] = row["status"].as<std::string>();
+                    o["created_at"] = row["created_at"].as<std::string>();
+                    arr.append(o);
+                }
+                callback(drogon::HttpResponse::newHttpJsonResponse(arr));
+            },
+            [callback](const drogon::orm::DrogonDbException& e) {
+                auto resp = drogon::HttpResponse::newHttpJsonResponse(Json::Value());
+                resp->setStatusCode(drogon::k500InternalServerError);
+                callback(resp);
+            }, userId);
+    }, {drogon::Get});
+
+        drogon::app().registerHandler("/api/orders/{id}", [](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, int orderId) {
+        int userId;
+        try { userId = getUserIdFromToken(req); }
+        catch (...) {
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(Json::Value());
+            resp->setStatusCode(drogon::k401Unauthorized);
+            callback(resp);
+            return;
+        }
+        auto client = drogon::app().getDbClient();
+        client->execSqlAsync("SELECT id, total_amount, status, created_at FROM orders WHERE id = $1 AND user_id = $2",
+            [callback, orderId, client](const drogon::orm::Result& r) {
+                if (r.empty()) {
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(Json::Value());
+                    resp->setStatusCode(drogon::k404NotFound);
+                    callback(resp);
+                    return;
+                }
+                Json::Value order;
+                order["id"] = r[0]["id"].as<int>();
+                order["total_amount"] = r[0]["total_amount"].as<double>();
+                order["status"] = r[0]["status"].as<std::string>();
+                order["created_at"] = r[0]["created_at"].as<std::string>();
+
+                client->execSqlAsync("SELECT product_id, quantity, price FROM order_items WHERE order_id = $1",
+                    [callback, order](const drogon::orm::Result& r2) mutable {
+                        Json::Value items(Json::arrayValue);
+                        for (auto row : r2) {
+                            Json::Value it;
+                            it["product_id"] = row["product_id"].as<int>();
+                            it["quantity"] = row["quantity"].as<int>();
+                            it["price"] = row["price"].as<double>();
+                            items.append(it);
+                        }
+                        order["items"] = items;
+                        callback(drogon::HttpResponse::newHttpJsonResponse(order));
+                    },
+                    [callback](const drogon::orm::DrogonDbException& e) {
+                        auto resp = drogon::HttpResponse::newHttpJsonResponse(Json::Value());
+                        resp->setStatusCode(drogon::k500InternalServerError);
+                        callback(resp);
+                    }, orderId);
+            },
+            [callback](const drogon::orm::DrogonDbException& e) {
+                auto resp = drogon::HttpResponse::newHttpJsonResponse(Json::Value());
+                resp->setStatusCode(drogon::k500InternalServerError);
+                callback(resp);
+            }, orderId, userId);
+    }, {drogon::Get});
+
+        drogon::app().registerHandler("/api/orders/{id}/status", [](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, int orderId) {
+        int userId;
+        try { userId = getUserIdFromToken(req); }
+        catch (...) {
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(Json::Value());
+            resp->setStatusCode(drogon::k401Unauthorized);
+            callback(resp);
+            return;
+        }
+        auto jsonBody = req->getJsonObject();
+        if (!jsonBody || !jsonBody->isMember("status")) {
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(Json::Value());
+            resp->setStatusCode(drogon::k400BadRequest);
+            callback(resp);
+            return;
+        }
+        std::string newStatus = (*jsonBody)["status"].asString();
+        auto client = drogon::app().getDbClient();
+        client->execSqlAsync("UPDATE orders SET status = $1 WHERE id = $2 AND user_id = $3",
+            [callback](const drogon::orm::Result& r) {
+                Json::Value res;
+                res["message"] = "Order status updated";
+                callback(drogon::HttpResponse::newHttpJsonResponse(res));
+            },
+            [callback](const drogon::orm::DrogonDbException& e) {
+                auto resp = drogon::HttpResponse::newHttpJsonResponse(Json::Value());
+                resp->setStatusCode(drogon::k500InternalServerError);
+                callback(resp);
+            }, newStatus, orderId, userId);
+    }, {drogon::Put});
+
     drogon::app().run();
 
     return 0;
@@ -696,6 +807,7 @@ int getUserIdFromToken(const drogon::HttpRequestPtr& req) {
         return -1;
     }
 }
+
 
 
 
