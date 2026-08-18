@@ -620,6 +620,62 @@ int main() {
     }
 }, {drogon::Delete});
 
+    drogon::app().registerHandler("/api/checkout",
+[](const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+    int uid = getUserIdFromToken(req);
+    if (uid == -1) {
+        Json::Value res; res["status"]="error"; res["message"]="Unauthorized";
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k401Unauthorized); cb(resp); return;
+    }
+    auto json = req->getJsonObject();
+    if (!json || !(*json).isMember("address_line") || !(*json).isMember("city") ||
+        !(*json).isMember("pincode") || !(*json).isMember("phone")) {
+        Json::Value res; res["status"]="error"; res["message"]="address_line, city, pincode, phone required";
+        cb(drogon::HttpResponse::newHttpJsonResponse(res)); return;
+    }
+    std::string addr = (*json)["address_line"].asString();
+    std::string city = (*json)["city"].asString();
+    std::string pin = (*json)["pincode"].asString();
+    std::string phone = (*json)["phone"].asString();
+    try {
+        auto db = drogon::app().getDbClient();
+        auto cr = db->execSqlSync("SELECT id FROM cart WHERE user_id=$1", uid);
+        if (cr.size() == 0) {
+            Json::Value res; res["status"]="error"; res["message"]="Cart is empty";
+            cb(drogon::HttpResponse::newHttpJsonResponse(res)); return;
+        }
+        int cartId = cr[0]["id"].as<int>();
+        auto items = db->execSqlSync(
+            "SELECT ci.product_id, ci.quantity, p.price FROM cart_items ci "
+            "JOIN products p ON ci.product_id=p.id WHERE ci.cart_id=$1", cartId);
+        if (items.size() == 0) {
+            Json::Value res; res["status"]="error"; res["message"]="Cart is empty";
+            cb(drogon::HttpResponse::newHttpJsonResponse(res)); return;
+        }
+        double total = 0;
+        for (auto &row : items) total += row["price"].as<double>() * row["quantity"].as<int>();
+        auto orderRes = db->execSqlSync(
+            "INSERT INTO orders (user_id,total_amount,address_line,city,pincode,phone) "
+            "VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+            uid, total, addr, city, pin, phone);
+        int orderId = orderRes[0]["id"].as<int>();
+        for (auto &row : items) {
+            db->execSqlSync(
+                "INSERT INTO order_items (order_id,product_id,quantity,price) VALUES ($1,$2,$3,$4)",
+                orderId, row["product_id"].as<int>(), row["quantity"].as<int>(), row["price"].as<double>());
+        }
+        db->execSqlSync("DELETE FROM cart_items WHERE cart_id=$1", cartId);
+        Json::Value res; res["status"]="success"; res["message"]="Order placed successfully";
+        res["order_id"] = orderId; res["total_amount"] = total;
+        cb(drogon::HttpResponse::newHttpJsonResponse(res));
+    } catch (const drogon::orm::DrogonDbException &e) {
+        Json::Value res; res["status"]="error"; res["message"]=e.base().what();
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(res);
+        resp->setStatusCode(drogon::k500InternalServerError); cb(resp);
+    }
+}, {drogon::Post});
+
     drogon::app().loadConfigFile("./config.json");
     drogon::app().run();
 
@@ -640,6 +696,9 @@ int getUserIdFromToken(const drogon::HttpRequestPtr& req) {
         return -1;
     }
 }
+
+
+
 
 
 
